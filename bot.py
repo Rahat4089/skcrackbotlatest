@@ -17,9 +17,9 @@ from pyrogram.enums import ParseMode
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # Bot configuration
-API_ID = 1234567  # Replace with your API ID
-API_HASH = 'your_api_hash_here'  # Replace with your API HASH
-BOT_TOKEN = 'your_bot_token_here'  # Replace with your bot token
+API_ID = 23933044  # Replace with your API ID
+API_HASH = '6df11147cbec7d62a323f0f498c8c03a'  # Replace with your API HASH
+BOT_TOKEN = '7404536689:AAFUsSkHkLFa3NjE2x0PYjbFSEyU3gReplk'  # Replace with your bot token
 
 app = Client("ip_tools_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
