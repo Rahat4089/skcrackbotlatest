@@ -27,13 +27,13 @@ approved_users = set()
 approved_groups = set()
 
 try:
-    with open('ass_users.txt', 'r') as user_file:
+    with open('auth_users.txt', 'r') as user_file:
         approved_users = set(line.strip() for line in user_file)
 except FileNotFoundError:
     pass
 
 try:
-    with open('ass_groups.txt', 'r') as group_file:
+    with open('auth_groups.txt', 'r') as group_file:
         approved_groups = set(line.strip() for line in group_file)
 except FileNotFoundError:
     pass
