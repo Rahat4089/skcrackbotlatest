@@ -1,7 +1,7 @@
 pyrofork
 tgcrypto
-flask
-gunicorn
-faker
-requests
-urllib3
+faker 
+requests 
+urllib3 
+ipaddress
+colorama
